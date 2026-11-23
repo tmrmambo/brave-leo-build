@@ -1,0 +1,85 @@
+name: Build (public runner)
+
+# Compiles tmrmambo/brave-leo-sdk (private) on GitHub's free public-repo runners
+# and publishes the proxy exe as a pre-release on the PRIVATE repo. Public repos
+# get unmetered standard runners, so the private account's Actions minutes are
+# not used. Only pushes to this repo and manual runs trigger it: a pull request
+# from a fork could otherwise run arbitrary code on the runner with the token.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  SRC_REPO: tmrmambo/brave-leo-sdk
+  SRC_REF: feat/ohttp-stream-and-think
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Fetch private source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_TOKEN }}
+        run: |
+          if (-not $env:GH_TOKEN) { throw "BUILD_TOKEN secret is missing" }
+          # Clone with the token, then drop it from the git config so later steps
+          # (and build scripts) cannot read it back from the checkout.
+          git clone --depth 1 --branch $env:SRC_REF "https://x-access-token:$env:GH_TOKEN@github.com/$env:SRC_REPO.git" src
+          if ($LASTEXITCODE -ne 0) { throw "clone failed" }
+          git -C src remote set-url origin "https://github.com/$env:SRC_REPO.git"
+          "SRC_SHA=$(git -C src rev-parse --short HEAD)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install LLVM and NASM
+        shell: pwsh
+        run: |
+          choco install llvm nasm -y
+          echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          shared-key: windows-msvc-public
+
+      - name: Build proxy (release)
+        working-directory: src
+        run: cargo build --release -p brave-leo-proxy --bin brave-leo-proxy --target x86_64-pc-windows-msvc
+
+      - name: Run tests
+        working-directory: src
+        run: cargo test -p brave-leo-proxy -p brave-leo-sdk --lib --bins --tests --target x86_64-pc-windows-msvc
+
+      - name: Publish pre-release to the private repo
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_TOKEN }}
+          SRC_REPO: ${{ env.SRC_REPO }}
+        run: |
+          $exe = "src/target/x86_64-pc-windows-msvc/release/brave-leo-proxy.exe"
+          if (-not (Test-Path $exe)) { throw "exe not built" }
+          $tag = "ci-" + ($env:SRC_REF -replace '[^A-Za-z0-9._-]', '-')
+          $sha = $env:SRC_SHA
+          # Replace the previous build for this branch.
+          gh release view $tag --repo $env:SRC_REPO *> $null
+          if ($LASTEXITCODE -eq 0) { gh release delete $tag --repo $env:SRC_REPO --cleanup-tag --yes }
+          gh release create $tag $exe --repo $env:SRC_REPO --prerelease `
+            --target $sha `
+            --title "CI build: $env:SRC_REF ($sha)" `
+            --notes "Built on the public runner from $env:SRC_REF at $sha. Replaced on every run."
+          if ($LASTEXITCODE -ne 0) { throw "release publish failed" }
