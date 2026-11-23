@@ -35,7 +35,7 @@ jobs:
           git clone --depth 1 --branch $env:SRC_REF "https://x-access-token:$env:GH_TOKEN@github.com/$env:SRC_REPO.git" src
           if ($LASTEXITCODE -ne 0) { throw "clone failed" }
           git -C src remote set-url origin "https://github.com/$env:SRC_REPO.git"
-          "SRC_SHA=$(git -C src rev-parse --short HEAD)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SRC_SHA=$(git -C src rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Install LLVM and NASM
         shell: pwsh
@@ -74,12 +74,12 @@ jobs:
           $exe = "src/target/x86_64-pc-windows-msvc/release/brave-leo-proxy.exe"
           if (-not (Test-Path $exe)) { throw "exe not built" }
           $tag = "ci-" + ($env:SRC_REF -replace '[^A-Za-z0-9._-]', '-')
-          $sha = $env:SRC_SHA
+          $sha = $env:SRC_SHA; $short = $sha.Substring(0, 7)
           # Replace the previous build for this branch.
           gh release view $tag --repo $env:SRC_REPO *> $null
           if ($LASTEXITCODE -eq 0) { gh release delete $tag --repo $env:SRC_REPO --cleanup-tag --yes }
           gh release create $tag $exe --repo $env:SRC_REPO --prerelease `
             --target $sha `
-            --title "CI build: $env:SRC_REF ($sha)" `
-            --notes "Built on the public runner from $env:SRC_REF at $sha. Replaced on every run."
+            --title "CI build: $env:SRC_REF ($short)" `
+            --notes "Built on the public runner from $env:SRC_REF at $short. Replaced on every run."
           if ($LASTEXITCODE -ne 0) { throw "release publish failed" }
